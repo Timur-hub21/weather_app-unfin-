@@ -36,6 +36,15 @@ dependencies:
   cupertino_icons: ^1.0.2
   http: ^0.13.4
   intl: ^0.17.0
+  geolocator: ^8.0.3
+  geocoding: ^2.0.2
+  permission_handler: ^8.3.0
+  connectivity_plus: ^2.2.0
+  hive: ^2.0.5
+  hive_flutter: ^1.1.0
+  path_provider: ^2.0.8
+  toast: ^0.1.5
+
 
 dev_dependencies:
   flutter_test:

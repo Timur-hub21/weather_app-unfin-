@@ -1,6 +1,6 @@
 class Location {
-  final String city;
-  final String country;
+  late final String city;
+  late final String country;
   final String lat;
   final String lon;
 

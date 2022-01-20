@@ -1,68 +1,252 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/services.dart';
+import 'package:geocoding/geocoding.dart' as fio;
+import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:new_weather_app/models/forecast.dart';
 import 'package:new_weather_app/models/weather.dart';
+import 'package:path_provider/path_provider.dart';
 import 'models/location.dart';
 import 'package:new_weather_app/extensions.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:toast/toast.dart';
 
 class CurrentWeatherPage extends StatefulWidget {
   final List<Location> locations;
   final BuildContext context;
-  const CurrentWeatherPage(this.locations, this.context);
+  CurrentWeatherPage(this.locations, this.context, {Key? key});
 
   @override
   _CurrentWeatherPageState createState() => _CurrentWeatherPageState(locations);
 }
 
 class _CurrentWeatherPageState extends State<CurrentWeatherPage> {
+  ConnectivityResult _connectivityResult = ConnectivityResult.none;
+  final Connectivity _connectivity = Connectivity();
+  late StreamSubscription<ConnectivityResult> _streamSubscription;
   final List<Location> locations;
   final Location location;
+  Position? _currentPosition;
+  String? _currentAddress;
+  PermissionStatus? _status;
+  late Box box;
+  List data = [];
 
-  _CurrentWeatherPageState(this.locations)
-      : location = locations[0];
+  Future openBox() async {
+    var dir = await getApplicationDocumentsDirectory();
+    Hive.init(dir.path);
+    box = await Hive.openBox('data');
+    return;
+  }
+
+  Future<bool> getAllData(data) async {
+    await openBox();
+    String apiKey = "729b80b4f20cffdcb8afd03a35945d82";
+    String city = location.city;
+    String url =
+        "https://api.openweathermap.org/data/2.5/weather?q=$city&appid=$apiKey&units=metric";
+
+    try {
+      var response = await http.get(Uri.parse(url));
+      var _jsonDecode = jsonDecode(response.body);
+
+      await putData(_jsonDecode);
+    } catch (SocketException) {
+      print('No internet connection');
+    }
+
+    var mymap = box.toMap().values.toList();
+    if (mymap.isEmpty) {
+      data.add('empty');
+    } else {
+      data = mymap;
+    }
+    return Future.value(true);
+  }
+
+  Future putData(data) async {
+    await box.clear();
+    for (var d in data) {
+      box.add(d);
+    }
+  }
+
+  Future<void> updateData() async {
+    await openBox();
+    String apiKey = "729b80b4f20cffdcb8afd03a35945d82";
+    String city = location.city;
+    String url =
+        "https://api.openweathermap.org/data/2.5/weather?q=$city&appid=$apiKey&units=metric";
+
+    try {
+      var response = await http.get(Uri.parse(url));
+      var _jsonDecode = jsonDecode(response.body);
+
+      await putData(_jsonDecode);
+    } catch (SocketException) {
+      Toast.show('No Internet connection', context,
+      duration: Toast.LENGTH_LONG, gravity: Toast.BOTTOM);
+    }
+  }
+
+  Future<void> initConnectivity() async {
+    late ConnectivityResult result;
+
+    try {
+      result = await _connectivity.checkConnectivity();
+    } on PlatformException catch (e) {
+      print(e.toString());
+      return;
+    }
+    if (!mounted) {
+      return Future.value(null);
+    }
+    return _updateConnectionStatus(result);
+  }
+
+  Future<void> _updateConnectionStatus(ConnectivityResult result) async {
+    setState(() {
+      _connectivityResult = result;
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    Permission.locationWhenInUse.status.then(_updateStatus);
+    initConnectivity();
+
+    _streamSubscription =
+        _connectivity.onConnectivityChanged.listen(_updateConnectionStatus);
+  }
+
+  @override
+  void dispose() {
+    _streamSubscription.cancel();
+    super.dispose();
+  }
+
+  void _updateStatus(PermissionStatus status) {
+    if (status != _status) {
+      setState(() {
+        _status = status;
+      });
+    }
+  }
+
+  void _askPermission() {
+    [Permission.location, Permission.locationWhenInUse]
+        .request()
+        .then(_onStatusRequested);
+  }
+
+  void _onStatusRequested(Map<Permission, PermissionStatus> statuses) {
+    final status = statuses[Permission.locationWhenInUse];
+    if (status != PermissionStatus.granted) {
+      openAppSettings();
+    } else {
+      _updateStatus(status!);
+    }
+  }
+
+  _CurrentWeatherPageState(this.locations) : location = locations[0];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.blue,
-      body: ListView(
-        children: <Widget>[
-          currentWeatherViews(locations, location, context),
-          forcastViewsHourly(location),
-          forcastViewsDaily(location),
+      bottomNavigationBar:
+          Text('Connection Status: ${_connectivityResult.toString()}'),
+      appBar: AppBar(
+        centerTitle: true,
+        title: Text(
+          'Weather App',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.black),
+        ),
+        backgroundColor: Colors.white,
+        actions: <Widget>[
+          if (_currentAddress != null) Text(_currentAddress!),
+          TextButton(
+            child: Text("Get Location"),
+            onPressed: () {
+              _askPermission();
+              _getCurrentLocation();
+            },
+          )
         ],
       ),
+      backgroundColor: Colors.blue,
+      body: ListView(
+                    children: <Widget>[
+                      currentWeatherViews(locations, location, context),
+                      forcastViewsHourly(location),
+                      forcastViewsDaily(location),
+                    ],
+                  ),
     );
+  }
+
+  _getCurrentLocation() {
+    Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.best,
+            forceAndroidLocationManager: true)
+        .then((Position position) {
+      setState(() {
+        _currentPosition = position;
+        getAddressFromLatLng();
+      });
+    }).catchError((e) {
+      print(e);
+    });
+  }
+
+  getAddressFromLatLng() async {
+    try {
+      List<fio.Placemark> placemarks = await fio.placemarkFromCoordinates(
+          _currentPosition!.latitude, _currentPosition!.longitude);
+
+      fio.Placemark place = placemarks[0];
+
+      setState(() {
+        _currentAddress =
+            "${place.locality}, ${place.postalCode}, ${place.country}";
+      });
+    } catch (e) {
+      print(e);
+    }
   }
 }
 
-  Widget currentWeatherViews(
-      List<Location> locations, Location location, BuildContext context) {
-    Weather? _weather;
+Widget currentWeatherViews(
+    List<Location> locations, Location location, BuildContext context) {
+  Weather? _weather;
 
-    return FutureBuilder(
-      builder: (context, snapshot) {
-        if (snapshot.hasData) {
-          _weather = snapshot.data as Weather?;
-          if (_weather == null) {
-            return const Text("Error getting weather");
-          } else {
-            return Column(children: [
-              createAppBar(locations, location, context),
-              weatherBox(_weather!),
-              weatherDetailsBox(_weather!),
-            ]);
-          }
+  return FutureBuilder(
+    builder: (context, snapshot) {
+      if (snapshot.hasData) {
+        _weather = snapshot.data as Weather?;
+        if (_weather == null) {
+          return const Text("Error getting weather");
         } else {
-          return Center(child: CircularProgressIndicator());
+          return Column(children: [
+            createAppBar(locations, location, context),
+            weatherBox(_weather!),
+            weatherDetailsBox(_weather!),
+          ]);
         }
-      },
-      future: getCurrentWeather(location),
-    );
-  }
-  
+      } else {
+        return Center(child: CircularProgressIndicator());
+      }
+    },
+    future: getCurrentWeather(location),
+  );
+}
+
 Widget forcastViewsHourly(Location location) {
   Forecast? _forcast;
 
@@ -103,48 +287,48 @@ Widget forcastViewsDaily(Location location) {
   );
 }
 
-Widget createAppBar(List<Location> locations, Location location, BuildContext context) {
+Widget createAppBar(
+    List<Location> locations, Location location, BuildContext context) {
   return Container(
-    padding: const EdgeInsets.only(left: 20, top: 15, bottom: 15, right: 20),
-    margin: const EdgeInsets.only(top: 35, left: 15.0, bottom: 15.0, right: 15.0),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: const BorderRadius.all(Radius.circular(60)),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.grey.withOpacity(0.1),
-          spreadRadius: 5,
-          blurRadius: 7,
-          offset: const Offset(0, 3),
-        )
-      ]
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text.rich(
-          TextSpan(
-            children: <TextSpan>[
-              TextSpan(
-                  text: '${location.city.capitalizeFirstOfEach}, ',
-                  style:
-                      const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              TextSpan(
-                  text: '${location.country.capitalizeFirstOfEach}',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.normal, fontSize: 16)),
-            ],
+      padding: const EdgeInsets.only(left: 20, top: 15, bottom: 15, right: 20),
+      margin:
+          const EdgeInsets.only(top: 35, left: 15.0, bottom: 15.0, right: 15.0),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: const BorderRadius.all(Radius.circular(60)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.withOpacity(0.1),
+              spreadRadius: 5,
+              blurRadius: 7,
+              offset: const Offset(0, 3),
+            )
+          ]),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text.rich(
+            TextSpan(
+              children: <TextSpan>[
+                TextSpan(
+                    text: '${location.city.capitalizeFirstOfEach}, ',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 16)),
+                TextSpan(
+                    text: '${location.country.capitalizeFirstOfEach}',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.normal, fontSize: 16)),
+              ],
+            ),
           ),
-        ),
-        const Icon(
-          Icons.keyboard_arrow_down_rounded,
-          color: Colors.black,
-          size: 24.0,
-          semanticLabel: 'Tap to change location',
-        ),
-      ],
-    )
-  );
+          const Icon(
+            Icons.keyboard_arrow_down_rounded,
+            color: Colors.black,
+            size: 24.0,
+            semanticLabel: 'Tap to change location',
+          ),
+        ],
+      ));
 }
 
 Widget weatherDetailsBox(Weather _weather) {
@@ -165,73 +349,70 @@ Widget weatherDetailsBox(Weather _weather) {
     child: Row(
       children: [
         Expanded(
-          child: Column(
-            children: [
-              const Text(
-                "Wind",
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-                color: Colors.grey),
-              ),
-              Text(
-                "${_weather.wind} km/h",
-                textAlign: TextAlign.left,
-                style: const TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 15,
-                color: Colors.black),
-              )
-            ],
-          )
-        ),
+            child: Column(
+          children: [
+            const Text(
+              "Wind",
+              textAlign: TextAlign.left,
+              style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                  color: Colors.grey),
+            ),
+            Text(
+              "${_weather.wind} km/h",
+              textAlign: TextAlign.left,
+              style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: Colors.black),
+            )
+          ],
+        )),
         Expanded(
-          child: Column(
-            children: [
-              const Text(
-                "Humidity",
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
-                color: Colors.grey),
-              ),
-              Text(
-                "${_weather.humidity.toInt()}%",
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 15,
-                color: Colors.black),
-              )
-            ],
-          )
-        ),
+            child: Column(
+          children: [
+            const Text(
+              "Humidity",
+              textAlign: TextAlign.left,
+              style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                  color: Colors.grey),
+            ),
+            Text(
+              "${_weather.humidity.toInt()}%",
+              textAlign: TextAlign.left,
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: Colors.black),
+            )
+          ],
+        )),
         Expanded(
-          child: Column(
-            children: [
-              Container(
-                  child: Text(
-                "Pressure",
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 12,
-                    color: Colors.grey),
-              )),
-              Container(
-                  child: Text(
-                "${_weather.pressure} hPa",
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                    color: Colors.black),
-              ))
-            ],
-          )
-        )
+            child: Column(
+          children: [
+            Container(
+                child: Text(
+              "Pressure",
+              textAlign: TextAlign.left,
+              style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                  color: Colors.grey),
+            )),
+            Container(
+                child: Text(
+              "${_weather.pressure} hPa",
+              textAlign: TextAlign.left,
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: Colors.black),
+            ))
+          ],
+        ))
       ],
     ),
   );
@@ -260,8 +441,8 @@ Widget weatherBox(Weather _weather) {
         padding: const EdgeInsets.all(15.0),
         margin: const EdgeInsets.all(15.0),
         height: 160.0,
-        decoration: BoxDecoration(
-            borderRadius: BorderRadius.all(Radius.circular(20))),
+        decoration:
+            BoxDecoration(borderRadius: BorderRadius.all(Radius.circular(20))),
         child: Row(
           children: [
             Expanded(
@@ -292,15 +473,14 @@ Widget weatherBox(Weather _weather) {
                 ])),
             Column(children: <Widget>[
               Container(
-                child: Text(
-                  "${_weather.temp.toInt()}°",
-                  textAlign: TextAlign.left,
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 60,
-                      color: Colors.white),
-              )
-              ),
+                  child: Text(
+                "${_weather.temp.toInt()}°",
+                textAlign: TextAlign.left,
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 60,
+                    color: Colors.white),
+              )),
               Container(
                   margin: const EdgeInsets.all(0),
                   child: Text(
@@ -348,7 +528,7 @@ Widget hourlyBoxes(Forecast _forecast) {
           itemBuilder: (BuildContext context, int index) {
             return Container(
                 padding: const EdgeInsets.only(
-                left: 10, top: 15, bottom: 15, right: 10),
+                    left: 10, top: 15, bottom: 15, right: 10),
                 margin: const EdgeInsets.all(5),
                 decoration: BoxDecoration(
                     color: Colors.white,
@@ -403,7 +583,7 @@ Widget dailyBoxes(Forecast _forcast) {
           itemBuilder: (BuildContext context, int index) {
             return Container(
                 padding: const EdgeInsets.only(
-                left: 10, top: 5, bottom: 5, right: 10),
+                    left: 10, top: 5, bottom: 5, right: 10),
                 margin: const EdgeInsets.all(5),
                 child: Row(children: [
                   Expanded(
@@ -439,7 +619,7 @@ class Clipper extends CustomClipper<Path> {
     path.lineTo(size.width, size.height - 60);
     path.lineTo(size.width, size.height);
     path.lineTo(0, size.height);
-    
+
     path.close();
 
     return path;
@@ -456,11 +636,12 @@ Future getCurrentWeather(Location location) async {
   var url =
       "https://api.openweathermap.org/data/2.5/weather?q=$city&appid=$apiKey&units=metric";
 
-  final response = await http.get(
-    Uri.parse(url));
+  final response = await http.get(Uri.parse(url));
 
   if (response.statusCode == 200) {
     weather = Weather.fromJson(jsonDecode(response.body));
+  } else {
+    throw Exception("Failed to load data");
   }
 
   return weather;
@@ -474,11 +655,12 @@ Future getForecast(Location location) async {
   var url =
       "https://api.openweathermap.org/data/2.5/onecall?lat=$lat&lon=$lon&appid=$apiKey&units=metric";
 
-  final response = await http.get(
-    Uri.parse(url));
+  final response = await http.get(Uri.parse(url));
 
   if (response.statusCode == 200) {
     forecast = Forecast.fromJson(jsonDecode(response.body));
+  } else {
+    throw Exception("Failed to load data");
   }
 
   return forecast;
